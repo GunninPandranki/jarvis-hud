@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>JARVIS HUD — Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --cyan:#4bd8ff;
+    --cyan-dim:#1c5f73;
+    --amber:#ffb454;
+    --bg:#020508;
+    --panel:#04141c;
+    --glow:0 0 12px rgba(75,216,255,.55);
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;height:100%;
+    background:radial-gradient(ellipse at center, #051820 0%, #010305 75%);
+    font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+    color:var(--cyan);
+    overflow:hidden;
+  }
+  #app{
+    position:relative;
+    width:100%;height:100vh;
+    display:flex;flex-direction:column;
+    padding:24px;
+  }
+  .scanlines{
+    position:fixed;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg,rgba(75,216,255,.03) 0px,rgba(75,216,255,.03) 1px,transparent 2px,transparent 4px);
+    mix-blend-mode:screen;
+  }
+  header{
+    display:flex;justify-content:space-between;align-items:center;
+    letter-spacing:3px;font-size:12px;font-weight:600;
+    border-bottom:1px solid var(--cyan-dim);
+    padding-bottom:10px;margin-bottom:16px;
+    text-shadow:var(--glow);
+  }
+  header .status{color:var(--amber);}
+  main{
+    flex:1;display:grid;
+    grid-template-columns:1fr 1.4fr 1fr;
+    gap:20px;min-height:0;
+  }
+  .panel{
+    background:linear-gradient(180deg, rgba(9,32,42,.5), rgba(2,8,11,.6));
+    border:1px solid var(--cyan-dim);
+    border-radius:8px;
+    padding:14px 16px;
+    position:relative;
+    box-shadow: inset 0 0 30px rgba(75,216,255,.05);
+    min-height:0;
+  }
+  .panel h3{
+    margin:0 0 10px;font-size:11px;letter-spacing:2px;
+    color:var(--amber);font-weight:600;text-transform:uppercase;
+    opacity:.85;
+  }
+  .core-wrap{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:18px;}
+  #core-svg{filter:drop-shadow(0 0 18px rgba(75,216,255,.6));}
+  .ring{transform-origin:150px 150px;}
+  #log{
+    height:100%;overflow-y:auto;font-size:12.5px;line-height:1.55;
+    padding-right:4px;
+  }
+  #log::-webkit-scrollbar{width:4px;}
+  #log::-webkit-scrollbar-thumb{background:var(--cyan-dim);}
+  .line{margin-bottom:8px;opacity:0;animation:fadein .4s forwards;}
+  @keyframes fadein{to{opacity:1;}}
+  .line.user{color:#dff5ff;}
+  .line.user b{color:var(--amber);}
+  .line.agent b{color:var(--cyan);}
+  .line.sys{color:#5a7d8a;font-style:italic;}
+  .waveform{display:flex;align-items:flex-end;gap:3px;height:40px;justify-content:center;margin-top:10px;}
+  .bar{width:4px;background:var(--cyan);border-radius:2px;box-shadow:var(--glow);transition:height .08s ease;}
+  .stat-row{display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px dashed rgba(75,216,255,.15);}
+  .stat-row span:last-child{color:#eaffff;}
+  footer{
+    margin-top:16px;display:flex;gap:12px;align-items:center;
+  }
+  #mic-btn{
+    width:64px;height:64px;border-radius:50%;
+    border:2px solid var(--cyan);background:rgba(75,216,255,.08);
+    color:var(--cyan);cursor:pointer;font-size:22px;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:var(--glow);transition:all .15s;
+    flex-shrink:0;
+  }
+  #mic-btn.active{
+    background:rgba(255,120,80,.15);border-color:#ff7850;color:#ff7850;
+    box-shadow:0 0 20px rgba(255,120,80,.7);
+    animation:pulse 1s infinite;
+  }
+  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
+  #text-input{
+    flex:1;background:#031117;border:1px solid var(--cyan-dim);
+    color:var(--cyan);padding:12px 14px;border-radius:6px;font-size:14px;
+    outline:none;
+  }
+  #text-input::placeholder{color:#3a6a78;}
+  #send-btn{
+    background:var(--cyan-dim);border:1px solid var(--cyan);color:#eaffff;
+    padding:0 20px;border-radius:6px;cursor:pointer;font-size:13px;
+    letter-spacing:1px;height:48px;
+  }
+  #send-btn:hover, #mic-btn:hover{filter:brightness(1.3);}
+  .hint{font-size:10.5px;color:#3a6a78;margin-top:6px;letter-spacing:1px;}
+  .badge{
+    padding:2px 8px;border:1px solid var(--cyan-dim);border-radius:10px;
+    font-size:10px;
+  }
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+<div id="app">
+  <header>
+    <div>J.A.R.V.I.S <span style="opacity:.5">// HUD DEMO BUILD</span></div>
+    <div class="status" id="status-text">STANDBY</div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <h3>System Status</h3>
+      <div class="stat-row"><span>Speech Recognition</span><span id="stat-asr">checking…</span></div>
+      <div class="stat-row"><span>Speech Synthesis</span><span id="stat-tts">checking…</span></div>
+      <div class="stat-row"><span>Agent Mode</span><span id="stat-mode">checking…</span></div>
+      <div class="stat-row"><span>Session Time</span><span id="stat-time">00:00:00</span></div>
+      <div class="stat-row"><span>Exchanges</span><span id="stat-count">0</span></div>
+      <div style="margin-top:16px;">
+        <h3>Try Saying</h3>
+        <div style="font-size:11.5px;line-height:2;opacity:.8">
+          "What time is it"<br>
+          "Tell me a status report"<br>
+          "Who are you"<br>
+          "Set a reminder"<br>
+          "Tell me a joke"
+        </div>
+      </div>
+    </div>
+
+    <div class="panel core-wrap">
+      <h3 style="align-self:flex-start;">Core</h3>
+      <svg id="core-svg" width="260" height="260" viewBox="0 0 300 300">
+        <circle class="ring" cx="150" cy="150" r="120" fill="none" stroke="var(--cyan-dim)" stroke-width="1"/>
+        <circle class="ring" id="ring1" cx="150" cy="150" r="100" fill="none" stroke="var(--cyan)" stroke-width="1.5" stroke-dasharray="8 6" opacity="0.7"/>
+        <circle class="ring" id="ring2" cx="150" cy="150" r="80" fill="none" stroke="var(--amber)" stroke-width="1" stroke-dasharray="3 10" opacity="0.6"/>
+        <circle id="core-inner" cx="150" cy="150" r="46" fill="rgba(75,216,255,.12)" stroke="var(--cyan)" stroke-width="2"/>
+        <circle id="core-pulse" cx="150" cy="150" r="30" fill="rgba(75,216,255,.35)"/>
+      </svg>
+      <div class="waveform" id="waveform"></div>
+      <div class="hint" id="core-caption">IDLE — awaiting input</div>
+    </div>
+
+    <div class="panel">
+      <h3>Conversation Log</h3>
+      <div id="log"></div>
+    </div>
+  </main>
+
+  <footer>
+    <button id="mic-btn" title="Hold to talk / click to toggle">🎤</button>
+    <input id="text-input" type="text" placeholder="Type a command, or use the mic…">
+    <button id="send-btn">SEND</button>
+  </footer>
+  <div class="hint">Speech recognition requires Chrome/Edge and microphone permission. Everything runs locally in this tab — no server, no API key.</div>
+</div>
+
+<script>
+(function(){
+  const logEl = document.getElementById('log');
+  const micBtn = document.getElementById('mic-btn');
+  const textInput = document.getElementById('text-input');
+  const sendBtn = document.getElementById('send-btn');
+  const statusText = document.getElementById('status-text');
+  const coreCaption = document.getElementById('core-caption');
+  const corePulse = document.getElementById('core-pulse');
+  const ring1 = document.getElementById('ring1');
+  const ring2 = document.getElementById('ring2');
+  const waveform = document.getElementById('waveform');
+  const statAsr = document.getElementById('stat-asr');
+  const statTts = document.getElementById('stat-tts');
+  const statTime = document.getElementById('stat-time');
+  const statCount = document.getElementById('stat-count');
+  const statMode = document.getElementById('stat-mode');
+
+  const SERVER_URL = 'http://localhost:8787';
+  let liveMode = false;
+  let conversationHistory = []; // {role:'user'|'model', text:''}
+
+  async function checkServer(){
+    try{
+      const res = await fetch(SERVER_URL + '/api/health', { method:'GET' });
+      const data = await res.json();
+      if(data.ok && data.keyConfigured){
+        liveMode = true;
+        statMode.textContent = 'LIVE (Gemini)';
+      } else if(data.ok){
+        liveMode = false;
+        statMode.textContent = 'server up, no key';
+      } else {
+        liveMode = false;
+        statMode.textContent = 'MOCK (local)';
+      }
+    } catch(e){
+      liveMode = false;
+      statMode.textContent = 'MOCK (local)';
+    }
+  }
+  checkServer();
+  setInterval(checkServer, 8000);
+
+  let exchangeCount = 0;
+  const startTime = Date.now();
+  setInterval(()=>{
+    const s = Math.floor((Date.now()-startTime)/1000);
+    const hh = String(Math.floor(s/3600)).padStart(2,'0');
+    const mm = String(Math.floor((s%3600)/60)).padStart(2,'0');
+    const ss = String(s%60).padStart(2,'0');
+    statTime.textContent = `${hh}:${mm}:${ss}`;
+  },1000);
+
+  // Build waveform bars
+  const NUM_BARS = 28;
+  const bars = [];
+  for(let i=0;i<NUM_BARS;i++){
+    const b = document.createElement('div');
+    b.className='bar';
+    b.style.height='4px';
+    waveform.appendChild(b);
+    bars.push(b);
+  }
+  let animActive = false;
+  function animateWave(active){
+    animActive = active;
+    if(active) tick();
+  }
+  function tick(){
+    if(!animActive){
+      bars.forEach(b=>b.style.height='4px');
+      return;
+    }
+    bars.forEach(b=>{
+      const h = 4 + Math.random()*34;
+      b.style.height = h+'px';
+    });
+    requestAnimationFrame(()=>setTimeout(tick, 70));
+  }
+
+  function setCoreState(state){
+    // state: 'idle' | 'listening' | 'thinking' | 'speaking'
+    ring1.style.animation = '';
+    ring2.style.animation = '';
+    if(state==='idle'){
+      coreCaption.textContent = 'IDLE — awaiting input';
+      corePulse.setAttribute('fill','rgba(75,216,255,.35)');
+      animateWave(false);
+      statusText.textContent = 'STANDBY';
+    } else if(state==='listening'){
+      coreCaption.textContent = 'LISTENING…';
+      corePulse.setAttribute('fill','rgba(255,120,80,.45)');
+      animateWave(true);
+      statusText.textContent = 'LISTENING';
+    } else if(state==='thinking'){
+      coreCaption.textContent = 'PROCESSING…';
+      corePulse.setAttribute('fill','rgba(255,180,84,.45)');
+      animateWave(false);
+      statusText.textContent = 'THINKING';
+    } else if(state==='speaking'){
+      coreCaption.textContent = 'RESPONDING…';
+      corePulse.setAttribute('fill','rgba(75,216,255,.55)');
+      animateWave(true);
+      statusText.textContent = 'SPEAKING';
+    }
+  }
+  setCoreState('idle');
+
+  function addLine(who, text){
+    const div = document.createElement('div');
+    div.className = 'line ' + (who==='You' ? 'user' : who==='SYS' ? 'sys' : 'agent');
+    div.innerHTML = who==='SYS' ? text : `<b>${who}:</b> ${text}`;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  addLine('SYS', 'System initialized. Mock agent online. Speak or type to begin.');
+
+  // ---- Speech synthesis ----
+  const synth = window.speechSynthesis;
+  const ttsSupported = !!synth;
+  statTts.textContent = ttsSupported ? 'available' : 'unsupported';
+  let preferredVoice = null;
+  function pickVoice(){
+    const voices = synth.getVoices();
+    preferredVoice = voices.find(v=>/en-GB|Daniel|Google UK English Male/i.test(v.name+v.lang))
+                  || voices.find(v=>/en/i.test(v.lang))
+                  || voices[0];
+  }
+  if(ttsSupported){
+    pickVoice();
+    synth.onvoiceschanged = pickVoice;
+  }
+  function speak(text){
+    if(!ttsSupported){ setCoreState('idle'); return; }
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    if(preferredVoice) u.voice = preferredVoice;
+    u.pitch = 0.85;
+    u.rate = 1.02;
+    setCoreState('speaking');
+    u.onend = ()=> setCoreState('idle');
+    synth.speak(u);
+  }
+
+  // ---- Speech recognition ----
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const asrSupported = !!SpeechRecognition;
+  statAsr.textContent = asrSupported ? 'available' : 'unsupported (try Chrome/Edge)';
+  let recognition = null;
+  let listening = false;
+
+  if(asrSupported){
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = ()=>{
+      listening = true;
+      micBtn.classList.add('active');
+      setCoreState('listening');
+    };
+    recognition.onend = ()=>{
+      listening = false;
+      micBtn.classList.remove('active');
+      if(!synth || !synth.speaking) setCoreState('idle');
+    };
+    recognition.onerror = (e)=>{
+      addLine('SYS', 'Mic error: ' + e.error + '. You can still type commands below.');
+      listening = false;
+      micBtn.classList.remove('active');
+      setCoreState('idle');
+    };
+    recognition.onresult = (e)=>{
+      const transcript = e.results[0][0].transcript;
+      handleUserInput(transcript);
+    };
+  }
+
+  micBtn.addEventListener('click', ()=>{
+    if(!asrSupported){
+      addLine('SYS', 'Speech recognition is not supported in this browser. Try Chrome or Edge, and open this file over http/https or file:// with mic permission granted.');
+      return;
+    }
+    if(listening){
+      recognition.stop();
+    } else {
+      try{ recognition.start(); }catch(err){ /* already started guard */ }
+    }
+  });
+
+  sendBtn.addEventListener('click', submitText);
+  textInput.addEventListener('keydown', (e)=>{
+    if(e.key==='Enter') submitText();
+  });
+  function submitText(){
+    const val = textInput.value.trim();
+    if(!val) return;
+    textInput.value='';
+    handleUserInput(val);
+  }
+
+  // ---- Mock agent ----
+  function mockAgentReply(input){
+    const t = input.toLowerCase();
+    if(/time/.test(t)){
+      const now = new Date();
+      return `The current time is ${now.toLocaleTimeString()}.`;
+    }
+    if(/date|today/.test(t)){
+      const now = new Date();
+      return `Today is ${now.toLocaleDateString(undefined,{weekday:'long',year:'numeric',month:'long',day:'numeric'})}.`;
+    }
+    if(/who are you|your name/.test(t)){
+      return "I'm a demo build of your Jarvis HUD — running as a local mock agent, no API connection required.";
+    }
+    if(/status report|status/.test(t)){
+      return "All systems nominal. Speech I/O active, mock reasoning engine online, no external connections in use.";
+    }
+    if(/joke/.test(t)){
+      const jokes = [
+        "I'd tell you a UDP joke, but you might not get it.",
+        "There are 10 types of people: those who understand binary, and those who don't.",
+        "Why do programmers prefer dark mode? Because light attracts bugs."
+      ];
+      return jokes[Math.floor(Math.random()*jokes.length)];
+    }
+    if(/reminder|remind me/.test(t)){
+      return "Reminder noted. In this demo build I don't persist it anywhere, but a real agent could hook into your calendar here.";
+    }
+    if(/hello|hi jarvis|hey jarvis/.test(t)){
+      return "Hello. Standing by for your instructions.";
+    }
+    if(/thank/.test(t)){
+      return "Anytime.";
+    }
+    return "Acknowledged: \"" + input + "\". This is a mock response — connect a real API key to replace this reasoning layer with live Gemini or Claude output.";
+  }
+
+  async function handleUserInput(text){
+    addLine('You', text);
+    exchangeCount++;
+    statCount.textContent = exchangeCount;
+    setCoreState('thinking');
+
+    if(liveMode){
+      try{
+        const res = await fetch(SERVER_URL + '/api/chat', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ message: text, history: conversationHistory })
+        });
+        const data = await res.json();
+        if(!res.ok || data.error){
+          addLine('SYS', 'Live agent error: ' + (data.error || res.statusText) + ' — falling back to mock reply.');
+          const reply = mockAgentReply(text);
+          addLine('Jarvis', reply);
+          speak(reply);
+          return;
+        }
+        conversationHistory.push({role:'user', text});
+        conversationHistory.push({role:'model', text: data.reply});
+        addLine('Jarvis', data.reply);
+        speak(data.reply);
+      } catch(err){
+        addLine('SYS', 'Could not reach local server — falling back to mock reply.');
+        const reply = mockAgentReply(text);
+        addLine('Jarvis', reply);
+        speak(reply);
+      }
+      return;
+    }
+
+    // Mock mode
+    const delay = 500 + Math.random()*700;
+    setTimeout(()=>{
+      const reply = mockAgentReply(text);
+      addLine('Jarvis', reply);
+      speak(reply);
+    }, delay);
+  }
+})();
+</script>
+</body>
+</html>
