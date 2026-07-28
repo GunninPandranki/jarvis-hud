@@ -218,36 +218,31 @@
     }
     animate();
 
-    // WebSocket connection for events
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}`);
-
-    ws.onopen = () => {
-      console.log('Connected to Jarvis Orb WebSocket');
-      statusEl.textContent = 'CONNECTED';
-      statusEl.style.color = '#4bd8ff';
-    };
-
-    ws.onmessage = (event) => {
+    // Poll for state updates via HTTP (more reliable than WebSocket in sandboxed environments)
+    let lastEventId = 0;
+    async function pollForUpdates() {
       try {
-        const msg = JSON.parse(event.data);
-        handleOrbEvent(msg);
+        const res = await fetch('/api/orb/state');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.events) {
+            statusEl.textContent = 'CONNECTED';
+            statusEl.style.color = '#4bd8ff';
+            data.events.forEach(event => {
+              if (event.id > lastEventId) {
+                lastEventId = event.id;
+                handleOrbEvent(event.data);
+              }
+            });
+          }
+        }
       } catch (e) {
-        console.error('Invalid message:', e);
+        statusEl.textContent = 'POLL';
+        statusEl.style.color = '#666';
       }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      statusEl.textContent = 'DISCONNECTED';
-      statusEl.style.color = '#ff6666';
-    };
-
-    ws.onclose = () => {
-      statusEl.textContent = 'DISCONNECTED';
-      statusEl.style.color = '#ff6666';
-      setTimeout(() => { window.location.reload(); }, 3000);
-    };
+      setTimeout(pollForUpdates, 100);
+    }
+    pollForUpdates();
 
     // Handle incoming events
     function handleOrbEvent(event) {

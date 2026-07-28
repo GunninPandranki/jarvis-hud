@@ -29,10 +29,14 @@ if (!API_KEY || API_KEY === 'YOUR_API_KEY_HERE') {
   console.warn('\n⚠️  No real GEMINI_API_KEY set in .env — /api/chat will return an error until you add one.\n');
 }
 
-// WebSocket server for Jarvis Orb
+// WebSocket server for Jarvis Orb (optional, used if browser supports it)
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const orbClients = new Set();
+
+// Event queue for polling
+const orbEvents = [];
+let eventIdCounter = 0;
 
 wss.on('connection', (ws) => {
   console.log('Orb client connected');
@@ -101,12 +105,24 @@ app.get('/api/health', (req, res) => {
 // Usage: POST http://localhost:8787/api/orb with JSON body
 app.post('/api/orb', (req, res) => {
   const event = req.body;
+
+  // Store in event queue for polling
+  orbEvents.push({ id: ++eventIdCounter, data: event });
+  if (orbEvents.length > 50) orbEvents.shift(); // Keep only last 50 events
+
+  // Broadcast via WebSocket if any clients are connected
   orbClients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify(event));
     }
   });
-  res.json({ sent: orbClients.size });
+
+  res.json({ sent: orbClients.size, queued: true });
+});
+
+// Polling endpoint for browsers that don't support WebSocket
+app.get('/api/orb/state', (req, res) => {
+  res.json({ events: orbEvents });
 });
 
 // Serve orb.html at root and /orb
