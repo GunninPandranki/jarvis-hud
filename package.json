@@ -5,7 +5,8 @@
   "description": "Local proxy server for Jarvis HUD demo - keeps API key server-side",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
