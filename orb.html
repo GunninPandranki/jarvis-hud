@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jarvis Orb</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: #0a0a0f;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #ccc;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #caption {
+      position: fixed;
+      bottom: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: 80%;
+      text-align: center;
+      font-size: 16px;
+      line-height: 1.6;
+      color: #aaa;
+      max-height: 120px;
+      overflow-y: auto;
+      animation: fadeIn 0.3s ease-out;
+    }
+    #caption .user { color: #4bd8ff; font-weight: 500; }
+    #caption .assistant { color: #a0ff9f; font-weight: 500; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+      to { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+    #status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      font-size: 12px;
+      color: #666;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="caption"></div>
+  <div id="status">STANDBY</div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    const captionEl = document.getElementById('caption');
+    const statusEl = document.getElementById('status');
+
+    // Resize canvas to fill window
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    // State
+    let state = 'idle'; // idle, listening, thinking, speaking
+    let amplitude = 0;
+    let targetAmplitude = 0;
+    let particleTime = 0;
+
+    // Particle system using canvas 2D
+    const particles = [];
+    const MAX_PARTICLES = 200;
+
+    class Particle {
+      constructor(x, y, vx, vy, life, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.life = life;
+        this.maxLife = life;
+        this.color = color;
+        this.size = Math.random() * 2 + 0.5;
+      }
+      update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.05; // gravity
+        this.life--;
+        // Damping
+        this.vx *= 0.98;
+        this.vy *= 0.98;
+      }
+      isDead() {
+        return this.life <= 0;
+      }
+      alpha() {
+        return Math.max(0, this.life / this.maxLife);
+      }
+    }
+
+    function emitParticles(count, x, y, speedMultiplier, colors) {
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (Math.random() * 2 + 1) * speedMultiplier;
+        const vx = Math.cos(angle) * speed;
+        const vy = Math.sin(angle) * speed;
+        const life = Math.random() * 40 + 40;
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        particles.push(new Particle(x, y, vx, vy, life, color));
+      }
+    }
+
+    function getOrbColors() {
+      if (state === 'listening') {
+        return ['#4bd8ff', '#2b8fb5', '#1c5f73', '#00d9ff'];
+      } else if (state === 'speaking') {
+        return ['#4bd8ff', '#00d9ff', '#ff9a56', '#ffb454', '#a0ff9f'];
+      } else {
+        return ['#4bd8ff', '#2b8fb5', '#1c5f73'];
+      }
+    }
+
+    // Animation loop
+    const ctx = canvas.getContext('2d');
+    let lastEmitTime = 0;
+
+    function animate() {
+      // Clear canvas with dark background
+      ctx.fillStyle = '#0a0a0f';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Smooth amplitude transition
+      amplitude += (targetAmplitude - amplitude) * 0.1;
+
+      // Calculate orb center and size
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const baseSize = 80;
+      const orbSize = baseSize + amplitude * 40;
+      const glowSize = orbSize * (1 + amplitude * 0.5);
+
+      // Draw glow
+      const glowGrad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, glowSize);
+      if (state === 'listening') {
+        glowGrad.addColorStop(0, 'rgba(75, 216, 255, 0.4)');
+        glowGrad.addColorStop(1, 'rgba(75, 216, 255, 0)');
+      } else if (state === 'speaking') {
+        glowGrad.addColorStop(0, 'rgba(255, 154, 86, 0.3)');
+        glowGrad.addColorStop(1, 'rgba(75, 216, 255, 0)');
+      } else {
+        glowGrad.addColorStop(0, 'rgba(75, 216, 255, 0.2)');
+        glowGrad.addColorStop(1, 'rgba(75, 216, 255, 0)');
+      }
+      ctx.fillStyle = glowGrad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Emit particles based on amplitude and state
+      const now = Date.now();
+      if (now - lastEmitTime > 50 && amplitude > 0.1) {
+        const colors = getOrbColors();
+        emitParticles(Math.floor(amplitude * 8 + 2), centerX, centerY, amplitude * 3, colors);
+        lastEmitTime = now;
+      }
+
+      // Update and draw particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.update();
+        if (p.isDead()) {
+          particles.splice(i, 1);
+        } else {
+          ctx.fillStyle = p.color.replace(')', `, ${p.alpha()})`).replace('rgb', 'rgba');
+          ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        }
+      }
+
+      // Draw core orb
+      const coreGrad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, orbSize);
+      if (state === 'listening') {
+        coreGrad.addColorStop(0, '#ffffff');
+        coreGrad.addColorStop(0.3, '#4bd8ff');
+        coreGrad.addColorStop(1, '#1c5f73');
+      } else if (state === 'speaking') {
+        coreGrad.addColorStop(0, '#ffb454');
+        coreGrad.addColorStop(0.3, '#00d9ff');
+        coreGrad.addColorStop(1, '#1c5f73');
+      } else {
+        coreGrad.addColorStop(0, '#4bd8ff');
+        coreGrad.addColorStop(0.5, '#2b8fb5');
+        coreGrad.addColorStop(1, '#1c5f73');
+      }
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, orbSize, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw subtle inner ring
+      ctx.strokeStyle = `rgba(75, 216, 255, ${0.3 + amplitude * 0.3})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, orbSize * 0.7, 0, Math.PI * 2);
+      ctx.stroke();
+
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // WebSocket connection for events
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}`);
+
+    ws.onopen = () => {
+      console.log('Connected to Jarvis Orb WebSocket');
+      statusEl.textContent = 'CONNECTED';
+      statusEl.style.color = '#4bd8ff';
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleOrbEvent(msg);
+      } catch (e) {
+        console.error('Invalid message:', e);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      statusEl.textContent = 'DISCONNECTED';
+      statusEl.style.color = '#ff6666';
+    };
+
+    ws.onclose = () => {
+      statusEl.textContent = 'DISCONNECTED';
+      statusEl.style.color = '#ff6666';
+      setTimeout(() => { window.location.reload(); }, 3000);
+    };
+
+    // Handle incoming events
+    function handleOrbEvent(event) {
+      if (event.state) {
+        state = event.state;
+        statusEl.textContent = state.toUpperCase();
+        if (state === 'listening') statusEl.style.color = '#4bd8ff';
+        else if (state === 'speaking') statusEl.style.color = '#ffb454';
+        else statusEl.style.color = '#666';
+      }
+      if (typeof event.amplitude !== 'undefined') {
+        targetAmplitude = Math.max(0, Math.min(1, event.amplitude));
+      }
+      if (event.caption) {
+        addCaption(event.caption, event.speaker || 'assistant');
+      }
+    }
+
+    // Caption management
+    let captionTimeout;
+    const captions = [];
+
+    function addCaption(text, speaker) {
+      captions.push({ text, speaker, time: Date.now() });
+      renderCaptions();
+      clearTimeout(captionTimeout);
+      captionTimeout = setTimeout(() => {
+        captions.length = 0;
+        captionEl.innerHTML = '';
+      }, 5000);
+    }
+
+    function renderCaptions() {
+      captionEl.innerHTML = captions
+        .map(cap => `<div class="${cap.speaker}">${escapeHtml(cap.text)}</div>`)
+        .join('');
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

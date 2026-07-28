@@ -12,10 +12,14 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const path = require('path');
+const http = require('http');
+const WebSocket = require('ws');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(__dirname));
 
 const PORT = process.env.PORT || 8787;
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -24,6 +28,21 @@ const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 if (!API_KEY || API_KEY === 'YOUR_API_KEY_HERE') {
   console.warn('\n⚠️  No real GEMINI_API_KEY set in .env — /api/chat will return an error until you add one.\n');
 }
+
+// WebSocket server for Jarvis Orb
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+const orbClients = new Set();
+
+wss.on('connection', (ws) => {
+  console.log('Orb client connected');
+  orbClients.add(ws);
+
+  ws.on('close', () => {
+    console.log('Orb client disconnected');
+    orbClients.delete(ws);
+  });
+});
 
 app.post('/api/chat', async (req, res) => {
   try {
@@ -78,6 +97,29 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Jarvis proxy server running at http://localhost:${PORT}`);
+// Endpoint to control the Orb UI (push state, amplitude, captions)
+// Usage: POST http://localhost:8787/api/orb with JSON body
+app.post('/api/orb', (req, res) => {
+  const event = req.body;
+  orbClients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(event));
+    }
+  });
+  res.json({ sent: orbClients.size });
+});
+
+// Serve orb.html at root and /orb
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'orb.html'));
+});
+app.get('/orb', (req, res) => {
+  res.sendFile(path.join(__dirname, 'orb.html'));
+});
+
+server.listen(PORT, () => {
+  console.log(`Jarvis server running at http://localhost:${PORT}`);
+  console.log(`  → Orb UI: http://localhost:${PORT}/orb`);
+  console.log(`  → Control: POST http://localhost:${PORT}/api/orb`);
+  console.log(`  → WebSocket: ws://localhost:${PORT}`);
 });
