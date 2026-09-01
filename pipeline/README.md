@@ -32,7 +32,8 @@ of a crash. Add keys incrementally to upgrade each stage to the real thing.
 | Virality analyzer | Deterministic scoring heuristic (log-scaled volume + engagement ratio + recency half-life + source weight) | *(none needed)* | — always live |
 | Research / fact-check / story / script / visual direction / QA copy | Anthropic Claude | `ANTHROPIC_API_KEY` | OpenAI, then a labeled stub |
 | ″ | OpenAI (fallback LLM) | `OPENAI_API_KEY` | — |
-| Image generation | OpenAI `gpt-image-1` | `OPENAI_API_KEY` | Stability AI, then a labeled placeholder SVG card |
+| Image generation | OpenAI `gpt-image-1` | `OPENAI_API_KEY` | next configured provider, then a labeled placeholder SVG card |
+| Image generation | Google Imagen (Gemini API) | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) + `IMAGE_PROVIDER=google` | — |
 | Image generation | Stability AI | `STABILITY_API_KEY` + `IMAGE_PROVIDER=stability` | — |
 | Voice/TTS | ElevenLabs | `ELEVENLABS_API_KEY` | OpenAI TTS, then a silent WAV of the correct duration |
 | Voice/TTS | OpenAI TTS | `OPENAI_API_KEY` | — |
@@ -41,6 +42,12 @@ of a crash. Add keys incrementally to upgrade each stage to the real thing.
 
 QA is a deterministic rule-based gate (runtime, fact-check pass, every scene
 has an image, etc.) — not LLM-graded — so it's fast and reproducible.
+
+**Note on Google Flow:** [Flow](https://labs.google/fx/tools/flow) (Google's
+consumer AI filmmaking tool, built on Veo/Imagen) has no public API, so it
+can't be wired into this pipeline programmatically. **Google Imagen**, used
+above, is the real, API-backed sibling of the image model Flow uses under
+the hood — that's what `IMAGE_PROVIDER=google` actually calls.
 
 ## Setup
 

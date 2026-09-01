@@ -18,6 +18,24 @@ async function generateWithOpenAI(prompt: string): Promise<Buffer> {
   return Buffer.from(b64, 'base64');
 }
 
+/** Google Imagen via the Gemini API's :predict endpoint. Needs GEMINI_API_KEY
+ * or GOOGLE_API_KEY — a real, documented API (unlike the Google Flow web
+ * app, which has no public API to call). */
+async function generateWithGoogleImagen(prompt: string): Promise<Buffer> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.googleImageModel}:predict?key=${config.googleApiKey}`;
+  const { data } = await axios.post(
+    url,
+    {
+      instances: [{ prompt }],
+      parameters: { sampleCount: 1, aspectRatio: '9:16' },
+    },
+    { timeout: 60_000 }
+  );
+  const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
+  if (!b64) throw new Error('Google Imagen API returned no image data');
+  return Buffer.from(b64, 'base64');
+}
+
 async function generateWithStability(prompt: string, negativePrompt?: string): Promise<Buffer> {
   const resp = await axios.post(
     'https://api.stability.ai/v2beta/stable-image/generate/core',
@@ -68,10 +86,16 @@ export async function generateImages(plan: VisualPlan, outDir: string): Promise<
     const base = path.join(outDir, `scene-${String(scene.sceneIndex).padStart(2, '0')}`);
     try {
       let buf: Buffer | null = null;
-      if (config.stabilityApiKey && config.imageProvider === 'stability') {
+      if (config.imageProvider === 'google' && config.googleApiKey) {
+        buf = await generateWithGoogleImagen(scene.imagePrompt);
+      } else if (config.imageProvider === 'stability' && config.stabilityApiKey) {
         buf = await generateWithStability(scene.imagePrompt, scene.negativePrompt);
       } else if (config.openaiApiKey) {
         buf = await generateWithOpenAI(scene.imagePrompt);
+      } else if (config.googleApiKey) {
+        buf = await generateWithGoogleImagen(scene.imagePrompt);
+      } else if (config.stabilityApiKey) {
+        buf = await generateWithStability(scene.imagePrompt, scene.negativePrompt);
       }
 
       if (buf) {

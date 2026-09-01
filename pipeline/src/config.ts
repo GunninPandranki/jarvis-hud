@@ -14,8 +14,10 @@ export const config = {
   openaiApiKey: env('OPENAI_API_KEY'),
 
   stabilityApiKey: env('STABILITY_API_KEY'),
-  imageProvider: env('IMAGE_PROVIDER', 'openai') as 'openai' | 'stability',
+  googleApiKey: env('GEMINI_API_KEY') || env('GOOGLE_API_KEY'),
+  imageProvider: env('IMAGE_PROVIDER', 'openai') as 'openai' | 'stability' | 'google',
   imageModel: env('IMAGE_MODEL', 'gpt-image-1'),
+  googleImageModel: env('GOOGLE_IMAGE_MODEL', 'imagen-4.0-generate-001'),
 
   elevenLabsApiKey: env('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: env('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM'),
