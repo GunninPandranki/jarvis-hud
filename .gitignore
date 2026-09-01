@@ -1,3 +1,8 @@
 node_modules/
 .env
 .claude/
+
+# Pipeline runtime artifacts
+pipeline/data/
+pipeline/output/
+pipeline/remotion/public/generated/
