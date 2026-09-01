@@ -1,0 +1,10 @@
+{
+  "_comment": "Claude Mobile / Claude Desktop MCP config — replace YOUR_VM_IP with your Oracle Cloud VM's public IP.",
+  "mcpServers": {
+    "google-flow": {
+      "type": "sse",
+      "url": "http://YOUR_VM_IP:3100/sse",
+      "_note": "After adding this, open the noVNC URL in your phone browser and sign into Google Flow manually. Claude will NEVER see your password."
+    }
+  }
+}
