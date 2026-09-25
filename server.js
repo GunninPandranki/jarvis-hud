@@ -20,6 +20,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 8787;
 const API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 
 if (!API_KEY || API_KEY === 'YOUR_API_KEY_HERE') {
   console.warn('\n⚠️  No real GEMINI_API_KEY set in .env — /api/chat will return an error until you add one.\n');
@@ -71,10 +72,53 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+app.post('/api/tts', async (req, res) => {
+  try {
+    if (!CARTESIA_API_KEY || CARTESIA_API_KEY === 'YOUR_API_KEY_HERE') {
+      return res.status(500).json({ error: 'Server has no API key configured. Add CARTESIA_API_KEY to your .env file.' });
+    }
+    const { transcript, voice, model_id, output_format, generation_config } = req.body;
+    if (!transcript || typeof transcript !== 'string') {
+      return res.status(400).json({ error: 'Missing "transcript" string in request body.' });
+    }
+
+    const response = await fetch('https://api.cartesia.ai/tts/bytes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': CARTESIA_API_KEY,
+        'Cartesia-Version': '2026-08-14'
+      },
+      body: JSON.stringify({
+        model_id: model_id || 'sonic-3.6',
+        transcript,
+        voice: voice || 'f6141af3-5f94-418c-80ed-a45d450e7e2e',
+        output_format: output_format || { container: 'wav', encoding: 'pcm_s16le', sample_rate: 44100 },
+        generation_config: generation_config || { speed: 1, volume: 1 }
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Cartesia API error:', errText);
+      return res.status(response.status).json({ error: errText || 'Cartesia API error' });
+    }
+
+    const audioBuffer = await response.buffer();
+    res.set('Content-Type', 'audio/wav');
+    res.send(audioBuffer);
+
+  } catch (err) {
+    console.error('Server error:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
-    keyConfigured: !!(API_KEY && API_KEY !== 'YOUR_API_KEY_HERE')
+    keyConfigured: !!(API_KEY && API_KEY !== 'YOUR_API_KEY_HERE'),
+    cartesiaKeyConfigured: !!(CARTESIA_API_KEY && CARTESIA_API_KEY !== 'YOUR_API_KEY_HERE')
   });
 });
 
