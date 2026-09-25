@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cold Call Agent — Test Line</title>
+<style>
+  :root {
+    --idle: #3a3f4b;
+    --listening: #4fc3f7;
+    --speaking: #66d9a0;
+    --processing: #ffb74d;
+  }
+  body {
+    font-family: system-ui, sans-serif; background: #0b0d12; color: #eee;
+    display: flex; flex-direction: column; align-items: center; padding: 40px;
+    min-height: 100vh; margin: 0; box-sizing: border-box;
+  }
+  h1 { font-size: 18px; color: #9fd; margin-bottom: 2px; }
+  .sub { color: #777; margin-bottom: 36px; font-size: 13px; }
+
+  #orbWrap { position: relative; width: 220px; height: 220px; display: flex; align-items: center; justify-content: center; margin-bottom: 26px; }
+  #orb {
+    width: 140px; height: 140px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #6b7280, var(--idle));
+    box-shadow: 0 0 40px 0 rgba(255,255,255,0.05);
+    transition: background 0.4s ease, box-shadow 0.4s ease, transform 0.2s ease;
+  }
+  #orb.listening { background: radial-gradient(circle at 35% 30%, #8fe0ff, var(--listening)); box-shadow: 0 0 60px 10px rgba(79,195,247,0.35); }
+  #orb.speaking  { background: radial-gradient(circle at 35% 30%, #a5f0c8, var(--speaking));  box-shadow: 0 0 60px 10px rgba(102,217,160,0.35); animation: pulse 0.9s ease-in-out infinite; }
+  #orb.processing{ background: radial-gradient(circle at 35% 30%, #ffd699, var(--processing)); box-shadow: 0 0 50px 8px rgba(255,183,77,0.3); animation: spin-glow 1.2s linear infinite; }
+  #orb.mic-active { transform: scale(var(--mic-scale, 1)); }
+
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+  @keyframes spin-glow { 0% { filter: brightness(1); } 50% { filter: brightness(1.3); } 100% { filter: brightness(1); } }
+
+  #transcript { width: 100%; max-width: 560px; min-height: 160px; background: #131620; border-radius: 10px; padding: 16px; margin-bottom: 20px; overflow-y: auto; max-height: 320px; }
+  .line { margin-bottom: 10px; line-height: 1.4; font-size: 14px; }
+  .agent { color: #9fd6ff; }
+  .you { color: #ffd79f; }
+
+  #controls { display: flex; gap: 12px; }
+  button { font-size: 15px; padding: 12px 26px; border-radius: 30px; border: none; cursor: pointer; }
+  #startBtn { background: #4caf50; color: white; }
+  #endBtn { background: #e53935; color: white; }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  #status { color: #888; font-size: 13px; margin-top: 14px; min-height: 16px; }
+</style>
+</head>
+<body>
+  <h1>Cold Call Agent — Local Test Line</h1>
+  <div class="sub">Mic/speaker test only. Not connected to a real phone number.</div>
+
+  <div id="orbWrap"><div id="orb" class="idle"></div></div>
+
+  <div id="controls">
+    <button id="startBtn">Start Call</button>
+    <button id="endBtn" disabled>End Call</button>
+  </div>
+  <div id="status">Press Start Call to begin.</div>
+
+  <div id="debug" style="font-family: monospace; font-size: 12px; color: #6a6; background: #0d1c10; border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; width: 100%; max-width: 560px;">
+    recognizer: <span id="dbgRecog">idle</span><br>
+    barge-in: <span id="dbgArmed">not armed</span> |
+    volume: <span id="dbgVol">0.000</span> |
+    threshold: 0.03 |
+    <span id="dbgBar" style="display:inline-block; width:100px; height:8px; background:#222; vertical-align:middle; margin-left:6px;"><span id="dbgBarFill" style="display:block; height:100%; width:0%; background:#4caf50;"></span></span>
+  </div>
+
+  <div id="transcript"></div>
+
+  <audio id="player" style="display:none"></audio>
+
+<script>
+const orb = document.getElementById('orb');
+const transcriptEl = document.getElementById('transcript');
+const startBtn = document.getElementById('startBtn');
+const endBtn = document.getElementById('endBtn');
+const statusEl = document.getElementById('status');
+const player = document.getElementById('player');
+
+let callActive = false;
+let recognition = null;
+let currentTurnId = 0; // cancellation token - every finishTurn() bumps this; stale
+                        // callbacks from an interrupted turn check against it and
+                        // no-op instead of racing (fixes "old sentence plays late")
+let playCtx = null;      // AudioContext for streamed playback
+let playGain = null;     // shared gain node - lets us fade out smoothly on barge-in instead of a hard click
+let nextPlayTime = 0;    // when the next scheduled chunk should start
+let fillers = { upbeat: [], neutral: [] }; // pre-generated filler clips, keyed by mood
+
+// Very lightweight mood detection from what the person just said - if it sounds
+// urgent/stressed/negative, use a neutral acknowledgment instead of a cheerful
+// filler ("Yeah, totally! Haha!" landing on "I'm late for a meeting" is exactly
+// the mismatch this avoids).
+const NEUTRAL_MOOD_WORDS = [
+  'late', 'busy', 'hurry', 'rush', 'sorry', "can't", 'cant', 'no time',
+  'gotta go', 'got to go', 'stressed', 'annoyed', 'upset', 'angry', 'bad time',
+  'not now', 'can we', 'call back', 'call me later', 'call later', 'urgent',
+  'emergency', 'problem', 'meeting', 'in a meeting', 'driving', 'not a good time',
+  'right now', 'later please', 'another time',
+];
+
+let lastFillerIndex = -1; // avoid repeating the exact same filler twice in a row
+
+function pickFillerPool(userText) {
+  try {
+    if (!fillers || !fillers.upbeat || !fillers.neutral) return [];
+    const lower = (userText || '').toLowerCase();
+    const isNeutralMood = NEUTRAL_MOOD_WORDS.some((w) => lower.includes(w));
+    const pool = isNeutralMood ? fillers.neutral : fillers.upbeat;
+    if (pool && pool.length > 0) return pool;
+    return fillers.upbeat.length > 0 ? fillers.upbeat : fillers.neutral;
+  } catch (e) {
+    return []; // never let filler selection itself break the turn
+  }
+}
+
+function pickFillerClip(pool) {
+  if (!pool || pool.length === 0) return null;
+  if (pool.length === 1) return pool[0];
+  let idx = Math.floor(Math.random() * pool.length);
+  if (idx === lastFillerIndex) idx = (idx + 1) % pool.length; // avoid immediate repeat
+  lastFillerIndex = idx;
+  return pool[idx];
+}
+let activeSources = [];  // currently scheduled/playing AudioBufferSourceNodes (for barge-in cutoff)
+let currentAbortController = null; // aborts the in-flight /api/turn_stream fetch on barge-in
+let bargeInTriggered = false; // prevents the interrupted code path from also calling listenForTurn
+let micStream = null;    // only held open during Asha's speech, for barge-in volume detection
+let micAnalyserCtx = null, micAnalyser = null;
+let bargeInWatcherInterval = null;
+const BARGE_IN_THRESHOLD = 0.03;  // volume level (0-1) above which we consider it real speech
+const BARGE_IN_SUSTAIN_MS = 130;  // how long volume must stay above threshold before treating it as a real interruption
+                                   // (tightened from 180ms - still enough to reject a brief cough/click)
+
+const RECOVERY_MS = 200; // never stay stuck more than this on any failure
+
+function recoverNow(reason) {
+  console.warn('[recover]', reason);
+  logEvent('recover', reason);
+  if (callActive) setTimeout(listenForTurn, RECOVERY_MS);
+}
+
+// Global safety net: any uncaught error or rejected promise during a live call
+// should not leave the app hung - recover and keep the conversation going.
+window.addEventListener('error', (e) => recoverNow('uncaught error: ' + e.message));
+window.addEventListener('unhandledrejection', (e) => recoverNow('unhandled rejection: ' + e.reason));
+
+// Streams state changes to the server console in real time - Claude has no
+// audio input, so this is the text-based stand-in for "hearing" the call live.
+function logEvent(event, detail) {
+  try {
+    fetch('/api/debug_log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, detail: detail !== undefined ? String(detail) : '' }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+
+function setOrbState(state) {
+  if (orb.className !== state) logEvent('orb', state);
+  orb.className = state;
+}
+
+function addLine(who, text) {
+  logEvent(who === 'Asha' ? 'asha_said' : 'you_said', text);
+  const div = document.createElement('div');
+  div.className = 'line ' + (who === 'Asha' ? 'agent' : 'you');
+  div.textContent = who + ': ' + text;
+  transcriptEl.appendChild(div);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function playAudio(url) {
+  return new Promise((resolve) => {
+    setOrbState('speaking');
+    player.src = url;
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    player.onended = done;
+    player.onpause = done; // fires when we force-stop it for barge-in
+    player.play();
+  });
+}
+
+function base64ToInt16(b64) {
+  const raw = atob(b64);
+  const buf = new ArrayBuffer(raw.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
+  return new Int16Array(buf);
+}
+
+function playPcmChunk(int16, sampleRate) {
+  if (!playCtx) {
+    playCtx = new (window.AudioContext || window.webkitAudioContext)();
+    playGain = playCtx.createGain();
+    playGain.gain.value = 1;
+    playGain.connect(playCtx.destination);
+    nextPlayTime = playCtx.currentTime;
+  }
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+  const buffer = playCtx.createBuffer(1, float32.length, sampleRate);
+  buffer.copyToChannel(float32, 0);
+
+  const source = playCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(playGain);
+  activeSources.push(source);
+
+  const startAt = Math.max(nextPlayTime, playCtx.currentTime);
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+
+  return new Promise((resolve) => {
+    source.onended = () => {
+      const idx = activeSources.indexOf(source);
+      if (idx !== -1) activeSources.splice(idx, 1);
+      resolve();
+    };
+  });
+}
+
+function stopAllPlayback() {
+  // Quick 40ms fade instead of an instant hard stop - avoids an audible click
+  // and feels like a natural cutoff rather than a mechanical chop.
+  if (playCtx && playGain && activeSources.length > 0) {
+    const now = playCtx.currentTime;
+    playGain.gain.cancelScheduledValues(now);
+    playGain.gain.setValueAtTime(playGain.gain.value, now);
+    playGain.gain.linearRampToValueAtTime(0.0001, now + 0.04);
+    const toStop = activeSources.slice();
+    setTimeout(() => {
+      toStop.forEach((s) => { try { s.stop(); } catch (e) {} });
+      if (playGain) playGain.gain.setValueAtTime(1, playCtx.currentTime); // reset for the next turn
+    }, 50);
+  }
+  activeSources = [];
+  if (playCtx) nextPlayTime = playCtx.currentTime;
+  try { player.pause(); } catch (e) {}
+}
+
+function getMicVolume() {
+  const data = new Uint8Array(micAnalyser.frequencyBinCount);
+  micAnalyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / data.length);
+}
+
+// Only ONE SpeechRecognition instance ever exists in this app (running two
+// concurrently is a known source of silent Chrome freezes). Barge-in instead
+// uses lightweight mic volume analysis to detect "user started talking" while
+// Asha is speaking, then cuts her off and starts the single real recognizer.
+//
+// IMPORTANT: the analyser's own getUserMedia stream is only held open WHILE
+// Asha is speaking, and fully released before real listening starts - holding
+// a second mic stream open at the same time as SpeechRecognition is a known
+// cause of SpeechRecognition going completely silent (no events at all) on
+// some Windows/Chrome setups.
+//
+// getUserMedia isn't instant (50-200ms+), so acquisition is split from arming:
+// prepareBargeInMic() is fired as early as possible (it has the whole reply-
+// generation wait, ~1-3s, to finish) so armBargeInWatcher() - called right when
+// Asha's audio actually starts - can start the volume-watching loop immediately
+// instead of racing a short filler clip against a not-yet-ready mic stream.
+async function prepareBargeInMic() {
+  if (micAnalyser || !callActive) return;
+  document.getElementById('dbgArmed').textContent = 'preparing mic...';
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!callActive) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; return; }
+    // Reuse one AudioContext across the whole call instead of creating/closing
+    // a fresh one every single turn - repeated create/close cycles are wasteful
+    // and a plausible contributor to instability after several turns.
+    if (!micAnalyserCtx || micAnalyserCtx.state === 'closed') {
+      micAnalyserCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    const source = micAnalyserCtx.createMediaStreamSource(micStream);
+    micAnalyser = micAnalyserCtx.createAnalyser();
+    micAnalyser.fftSize = 512;
+    source.connect(micAnalyser);
+  } catch (e) {
+    document.getElementById('dbgArmed').textContent = 'mic error: ' + e.message;
+  }
+}
+
+function armBargeInWatcher() {
+  if (!callActive || !micAnalyser || bargeInWatcherInterval) return;
+  document.getElementById('dbgArmed').textContent = 'ARMED';
+  logEvent('bargein', 'armed');
+  let aboveSince = null;
+  bargeInWatcherInterval = setInterval(() => {
+    const vol = getMicVolume();
+    document.getElementById('dbgVol').textContent = vol.toFixed(3);
+    document.getElementById('dbgBarFill').style.width = Math.min(100, (vol / BARGE_IN_THRESHOLD) * 50) + '%';
+    document.getElementById('dbgBarFill').style.background = vol > BARGE_IN_THRESHOLD ? '#ff9800' : '#4caf50';
+
+    if (vol > BARGE_IN_THRESHOLD) {
+      if (!aboveSince) aboveSince = Date.now();
+      else if (Date.now() - aboveSince > BARGE_IN_SUSTAIN_MS) {
+        handleBargeInDetected();
+      }
+    } else {
+      aboveSince = null;
+    }
+  }, 40); // tightened from 80ms - finer-grained polling catches speech onset sooner
+}
+
+function stopBargeInWatcher() {
+  document.getElementById('dbgArmed').textContent = 'not armed';
+  document.getElementById('dbgVol').textContent = '0.000';
+  document.getElementById('dbgBarFill').style.width = '0%';
+  if (bargeInWatcherInterval) {
+    clearInterval(bargeInWatcherInterval);
+    bargeInWatcherInterval = null;
+  }
+  const hadStream = !!micStream; // OS needs a moment to actually release the mic device
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
+  micAnalyser = null; // drop the analyser node - the shared AudioContext itself stays open
+  return hadStream;
+}
+
+function handleBargeInDetected() {
+  logEvent('bargein', 'DETECTED - interrupting Asha now');
+  currentTurnId++; // invalidate the interrupted turn's callbacks the instant we detect this
+  bargeInTriggered = true;
+  stopBargeInWatcher();
+  stopAllPlayback();
+  if (currentAbortController) { try { currentAbortController.abort(); } catch (e) {} }
+  setStatus('Interrupted — go ahead...');
+  listenForTurn();
+}
+
+function listenForTurn() {
+  if (!callActive) return;
+  const releasedAMicStream = stopBargeInWatcher(); // only one recognizer should be active at a time
+
+  // The OS needs a brief moment to actually release the mic device after we
+  // stop a getUserMedia stream - starting SpeechRecognition immediately can
+  // race that release and leave it silently stuck grabbing a busy device
+  // (real cause of the earlier "responds fine, then hangs after a turn" bug).
+  // Only add the delay when we actually just released a stream - skip it
+  // otherwise so most turns stay instant.
+  if (releasedAMicStream) {
+    document.getElementById('dbgArmed').textContent = 'releasing mic...';
+    // Tightened from 180ms to 120ms - still enough buffer against the mic
+    // device-contention freeze bug, while cutting the "words lost right after
+    // interrupting" window. If freezes reappear, raise this back up first.
+    setTimeout(() => startListeningNow(), 120);
+  } else {
+    startListeningNow();
+  }
+}
+
+function dbgRecog(msg) {
+  const el = document.getElementById('dbgRecog');
+  if (el) el.textContent = msg;
+  console.log('[recognizer]', msg);
+  logEvent('recognizer', msg);
+}
+
+function startListeningNow() {
+  if (!callActive) { dbgRecog('idle (call not active)'); return; }
+  setOrbState('listening');
+  setStatus('Listening...');
+  dbgRecog('creating...');
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    setStatus('Error: this browser does not support Speech Recognition (use Chrome).');
+    dbgRecog('UNSUPPORTED - use Chrome');
+    return;
+  }
+
+  recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  const MIN_CONFIDENCE = 0.5; // below this, re-listen instead of sending a likely-garbled transcript
+  let handled = false; // tracks whether onresult/onerror already decided what to do this session
+
+  // Hard backstop: if recognition NEVER fires any event at all (a real Chrome
+  // failure mode, not just slow) force recovery anyway rather than hanging forever.
+  let watchdogSecondsLeft = 8;
+  const watchdogTick = setInterval(() => {
+    watchdogSecondsLeft--;
+    if (!handled) dbgRecog(`listening, no event yet (watchdog in ${watchdogSecondsLeft}s)`);
+  }, 1000);
+  const watchdog = setTimeout(() => {
+    clearInterval(watchdogTick);
+    if (!handled) {
+      handled = true;
+      dbgRecog('WATCHDOG FIRED - no event within 8s, forcing recovery');
+      try { recognition.abort(); } catch (e) {}
+      recoverNow('watchdog - recognition produced no events within 8s');
+    }
+  }, 8000);
+
+  recognition.onstart = () => dbgRecog('listening (recognition.start() succeeded)');
+
+  recognition.onresult = (event) => {
+    clearTimeout(watchdog);
+    clearInterval(watchdogTick);
+    dbgRecog('got result');
+    const result = event.results[0][0];
+    const text = result.transcript;
+    const confidence = result.confidence; // 0 if browser doesn't report it (e.g. some Chrome versions)
+
+    if (confidence > 0 && confidence < MIN_CONFIDENCE) {
+      handled = true;
+      setStatus(`Didn't catch that clearly, go ahead and repeat...`);
+      return recoverNow('low confidence transcript');
+    }
+    handled = true;
+    finishTurn(text);
+  };
+
+  recognition.onerror = (event) => {
+    clearTimeout(watchdog);
+    clearInterval(watchdogTick);
+    handled = true;
+    dbgRecog('error: ' + event.error);
+    if (event.error === 'no-speech' || event.error === 'aborted') {
+      return recoverNow('no-speech/aborted');
+    }
+    setStatus('Mic error: ' + event.error + ' — listening again...');
+    recoverNow('mic error: ' + event.error);
+  };
+
+  recognition.onend = () => {
+    clearTimeout(watchdog);
+    clearInterval(watchdogTick);
+    // Chrome sometimes ends a session with neither a result nor an error event
+    // (e.g. it heard something but couldn't finalize a transcript). Without this,
+    // the app would hang on "Listening" forever with no request ever sent.
+    if (!handled) {
+      dbgRecog('ended with NO event fired - recovering');
+      recoverNow('recognition ended with no result');
+    }
+  };
+
+  try {
+    recognition.start();
+    dbgRecog('start() called, awaiting onstart...');
+  } catch (e) {
+    dbgRecog('start() THREW: ' + e.message);
+    setStatus('Mic restart error: ' + e.message + ' — retrying...');
+    recoverNow('recognition.start() threw');
+  }
+}
+
+async function finishTurn(userText) {
+  const myTurnId = ++currentTurnId; // this turn's cancellation token
+  logEvent('turn_start', `#${myTurnId}: "${userText}"`);
+  setOrbState('processing');
+  setStatus('Processing...');
+  stopBargeInWatcher(); // don't listen for interruption while we're not yet speaking
+
+  let ended = false;
+  let sampleRate = 44100;
+  let spoke = false;
+
+  // Start acquiring the barge-in mic stream right away - it has the whole
+  // reply-generation wait (~1-3s) to become ready, instead of racing a short
+  // filler clip against a not-yet-open getUserMedia stream.
+  prepareBargeInMic();
+
+  // Play ONE short natural filler matching the mood of what was just said - just
+  // enough to avoid dead silence, not a string of them. Only adds a second one
+  // if the reply is taking unusually long (rare), capped hard at 2 total.
+  const fillerPool = pickFillerPool(userText);
+  let lastChunkPromise = Promise.resolve();
+  let fillerChainCount = 0;
+  const MAX_FILLER_CHAIN = 2;
+  const CHAIN_CHECK_DELAY_MS = 900; // only consider a 2nd filler if still waiting after this long
+
+  function chainFillerIfStillWaiting(delay) {
+    try {
+      if (myTurnId !== currentTurnId) return; // this turn was interrupted - never speak a stale filler
+      if (spoke || fillerPool.length === 0 || fillerChainCount >= MAX_FILLER_CHAIN || !callActive) return;
+      fillerChainCount++;
+      const f = pickFillerClip(fillerPool);
+      if (f) lastChunkPromise = playPcmChunk(f.pcm, f.sampleRate);
+      setTimeout(() => chainFillerIfStillWaiting(CHAIN_CHECK_DELAY_MS), delay);
+    } catch (e) {
+      // fillers are a nice-to-have - never let a failure here break the turn
+    }
+  }
+
+  // Fillers are optional polish - wrapped so any failure here (bad clip, audio
+  // context issue, etc.) falls back to silently skipping them rather than
+  // taking down the whole turn. The real reply always proceeds regardless.
+  try {
+    if (fillerPool.length > 0) {
+      setOrbState('speaking');
+      armBargeInWatcher(); // starts immediately if the mic was already ready, otherwise no-ops harmlessly
+      chainFillerIfStillWaiting(CHAIN_CHECK_DELAY_MS);
+    }
+  } catch (e) {
+    console.warn('[fillers] skipped due to error:', e);
+  }
+
+  currentAbortController = new AbortController();
+  try {
+    const res = await fetch('/api/turn_stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: userText }),
+      signal: currentAbortController.signal,
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const rawEvent = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!rawEvent.startsWith('data:')) continue;
+
+        // Already-buffered events from an interrupted turn can still be sitting
+        // here even after abort() was called - never act on them once stale.
+        if (myTurnId !== currentTurnId) return;
+
+        const evt = JSON.parse(rawEvent.slice(5).trim());
+
+        if (evt.type === 'error') {
+          setStatus('Error: ' + evt.error + ' — listening again...');
+          return recoverNow('server-side turn error');
+        }
+        if (evt.type === 'reply') {
+          addLine('You', evt.user_text);
+          addLine('Asha', evt.reply_text);
+          sampleRate = evt.sample_rate || 44100;
+        }
+        if (evt.type === 'audio') {
+          if (!spoke) {
+            setOrbState('speaking');
+            setStatus('Speaking...');
+            spoke = true;
+            armBargeInWatcher(); // in case there were no fillers to arm it earlier (no-ops if already armed)
+          }
+          const int16 = base64ToInt16(evt.chunk);
+          lastChunkPromise = playPcmChunk(int16, sampleRate);
+        }
+        if (evt.type === 'done') {
+          ended = evt.ended;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return; // barge-in already fired the next turn - don't fight it
+    if (myTurnId !== currentTurnId) return; // stale turn - a newer one is already in charge
+    setStatus('Network error, listening again...');
+    return recoverNow('network error mid-turn: ' + e.message);
+  }
+
+  if (myTurnId !== currentTurnId) return; // interrupted while the stream was still open
+
+  // NOTE: do NOT stop the barge-in watcher here - the network stream finishing
+  // doesn't mean the audio has finished playing (chunks are scheduled ahead of
+  // real-time). Stopping here disarmed barge-in during the tail of Asha's
+  // actual speech. Wait for the real playback to finish first.
+  //
+  // Hard safety net: if the Web Audio API's onended event never fires for some
+  // reason (real observed failure mode - not hypothetical), don't hang on
+  // "Speaking" forever. Cap the wait generously (most replies play in well
+  // under this) and move on regardless.
+  try {
+    await Promise.race([
+      lastChunkPromise,
+      new Promise((resolve) => setTimeout(resolve, 15000)),
+    ]);
+  } catch (e) {
+    // a scheduled audio chunk failed to play - not fatal, just move on
+  }
+
+  if (myTurnId !== currentTurnId) return; // interrupted while waiting for playback to finish
+
+  stopBargeInWatcher(); // playback has actually finished now - safe to disarm
+
+  if (ended) {
+    endCall();
+    return;
+  }
+
+  if (bargeInTriggered) { bargeInTriggered = false; return; } // a new turn already started
+  if (callActive) listenForTurn();
+}
+
+async function startCall() {
+  logEvent('call', 'START button pressed');
+  startBtn.disabled = true;
+  setStatus('Connecting...');
+  try {
+    // Request mic permission up front so the browser doesn't prompt mid-call,
+    // then immediately release it - each barge-in window opens its own fresh
+    // stream, and SpeechRecognition needs the mic free while it's listening.
+    const primerStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    primerStream.getTracks().forEach((t) => t.stop());
+
+    // Fetch pre-generated filler clips once (best-effort - call still works without them).
+    fetch('/api/fillers').then((r) => r.json()).then((d) => {
+      const toClips = (arr) => (arr || []).map((b64) => ({ pcm: base64ToInt16(b64), sampleRate: d.sample_rate }));
+      fillers = { upbeat: toClips(d.fillers && d.fillers.upbeat), neutral: toClips(d.fillers && d.fillers.neutral) };
+    }).catch(() => {});
+
+    // Start acquiring the barge-in mic stream now, in parallel with /api/start's
+    // network round trip - by the time the opening line is ready to play, the
+    // analyser should already be armed and ready instead of racing to set up.
+    callActive = true;
+    prepareBargeInMic();
+
+    const res = await fetch('/api/start', { method: 'POST' });
+    const data = await res.json();
+
+    if (!res.ok || data.error) {
+      callActive = false;
+      setStatus('Error: ' + (data.error || res.statusText));
+      startBtn.disabled = false;
+      return;
+    }
+
+    addLine('Asha', data.text);
+    endBtn.disabled = false;
+
+    armBargeInWatcher();
+    await playAudio(data.audio_url);
+    stopBargeInWatcher();
+    if (bargeInTriggered) { bargeInTriggered = false; }
+    else if (callActive) listenForTurn();
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+    startBtn.disabled = false;
+  }
+}
+
+function endCall() {
+  logEvent('call', 'ENDED');
+  callActive = false;
+  if (recognition) { try { recognition.abort(); } catch (e) {} }
+  stopBargeInWatcher();
+  stopAllPlayback();
+  if (currentAbortController) { try { currentAbortController.abort(); } catch (e) {} }
+  bargeInTriggered = false;
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (micAnalyserCtx) { try { micAnalyserCtx.close(); } catch (e) {} micAnalyserCtx = null; micAnalyser = null; }
+  setOrbState('idle');
+  setStatus('Call ended. Refresh or press Start Call to begin a new one.');
+  startBtn.disabled = false;
+  endBtn.disabled = true;
+}
+
+startBtn.onclick = startCall;
+endBtn.onclick = () => {
+  fetch('/api/end', { method: 'POST' }).catch(() => {});
+  endCall();
+};
+</script>
+</body>
+</html>

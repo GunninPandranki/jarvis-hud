@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+_tmp_audio/
+_test_audio/
+output.wav
+call_logs/
